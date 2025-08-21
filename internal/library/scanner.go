@@ -337,25 +337,46 @@ func (s *Scanner) extractMetadata(track *domain.Track) error {
 }
 
 func (s *Scanner) saveAlbumArt(track *domain.Track, data []byte, ext string) string {
-	// Create album art cache directory
+	// Create album art cache directory with secure permissions
 	cacheDir := filepath.Join(os.TempDir(), "winramp", "albumart")
-	os.MkdirAll(cacheDir, 0755)
+	if err := os.MkdirAll(cacheDir, 0700); err != nil {
+		logger.Warn("Failed to create album art directory", logger.Error(err))
+		return ""
+	}
 	
-	// Generate filename based on artist and album
-	filename := fmt.Sprintf("%s_%s.%s",
-		sanitizeFilename(track.Artist),
-		sanitizeFilename(track.Album),
-		ext)
+	// Sanitize inputs BEFORE using them
+	safeArtist := sanitizeFilename(track.Artist)
+	safeAlbum := sanitizeFilename(track.Album)
+	safeExt := sanitizeFilename(ext)
 	
+	// Additional validation for extension
+	if safeExt == "" || len(safeExt) > 5 {
+		safeExt = "jpg"
+	}
+	
+	// Generate filename with sanitized inputs
+	filename := fmt.Sprintf("%s_%s.%s", safeArtist, safeAlbum, safeExt)
+	
+	// Construct path and validate it's within cache directory
 	path := filepath.Join(cacheDir, filename)
+	cleanedPath := filepath.Clean(path)
 	
-	// Save file
-	if err := os.WriteFile(path, data, 0644); err != nil {
+	// Verify the final path is within our cache directory
+	relPath, err := filepath.Rel(cacheDir, cleanedPath)
+	if err != nil || strings.HasPrefix(relPath, "..") || filepath.IsAbs(relPath) {
+		logger.Warn("Invalid path detected: potential traversal attempt",
+			logger.String("path", cleanedPath),
+			logger.String("cacheDir", cacheDir))
+		return ""
+	}
+	
+	// Save file with secure permissions
+	if err := os.WriteFile(cleanedPath, data, 0600); err != nil {
 		logger.Warn("Failed to save album art", logger.Error(err))
 		return ""
 	}
 	
-	return path
+	return cleanedPath
 }
 
 func (s *Scanner) processResults(ctx context.Context, result *ScanResult) {

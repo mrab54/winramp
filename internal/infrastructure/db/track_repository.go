@@ -132,17 +132,51 @@ func (r *TrackRepository) FindByGenre(genre string) ([]*domain.Track, error) {
 func (r *TrackRepository) Search(query string) ([]*domain.Track, error) {
 	var tracks []*domain.Track
 	
+	// Input validation
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return tracks, nil
+	}
+	
+	// Limit query length to prevent DoS
+	const maxQueryLength = 100
+	if len(query) > maxQueryLength {
+		query = query[:maxQueryLength]
+	}
+	
+	// Remove any SQL meta-characters for extra safety
+	// Even though GORM parameterizes, this adds defense in depth
+	query = sanitizeSearchQuery(query)
+	
 	// Build search query with wildcards
 	searchPattern := "%" + strings.ToLower(query) + "%"
 	
+	// Use parameterized query through GORM (already safe)
 	if err := r.db.Where(
 		"LOWER(title) LIKE ? OR LOWER(artist) LIKE ? OR LOWER(album) LIKE ? OR LOWER(genre) LIKE ?",
 		searchPattern, searchPattern, searchPattern, searchPattern,
-	).Find(&tracks).Error; err != nil {
+	).Limit(1000).Find(&tracks).Error; err != nil {
 		return nil, fmt.Errorf("failed to search tracks: %w", err)
 	}
 	
 	return tracks, nil
+}
+
+// sanitizeSearchQuery removes potentially dangerous characters from search queries
+func sanitizeSearchQuery(query string) string {
+	// Remove SQL comment markers and other dangerous patterns
+	replacer := strings.NewReplacer(
+		"--", "",
+		"/*", "",
+		"*/", "",
+		";", "",
+		"\\", "",
+		"\x00", "", // null bytes
+		"\n", " ",
+		"\r", " ",
+		"\t", " ",
+	)
+	return replacer.Replace(query)
 }
 
 func (r *TrackRepository) GetRecentlyPlayed(limit int) ([]*domain.Track, error) {

@@ -314,12 +314,17 @@ func (c *Config) getDataDir() string {
 
 func (c *Config) createDefaultConfig() error {
 	configDir := c.getUserConfigDir()
-	if err := os.MkdirAll(configDir, 0755); err != nil {
+	if err := os.MkdirAll(configDir, 0700); err != nil {
 		return err
 	}
 	
 	configPath := filepath.Join(configDir, "config.yaml")
-	return c.v.SafeWriteConfigAs(configPath)
+	if err := c.v.SafeWriteConfigAs(configPath); err != nil {
+		return err
+	}
+	
+	// Set secure file permissions (owner read/write only)
+	return os.Chmod(configPath, 0600)
 }
 
 func (c *Config) Save() error {

@@ -2,15 +2,19 @@ package network
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/winramp/winramp/internal/config"
 	"github.com/winramp/winramp/internal/logger"
 )
 
@@ -264,43 +268,86 @@ type RadioStation struct {
 
 // RadioDirectory provides access to internet radio stations
 type RadioDirectory struct {
-	stations []RadioStation
-	mu       sync.RWMutex
+	stations   []RadioStation
+	mu         sync.RWMutex
+	configPath string
 }
 
 // NewRadioDirectory creates a new radio directory
-func NewRadioDirectory() *RadioDirectory {
-	return &RadioDirectory{
-		stations: make([]RadioStation, 0),
+func NewRadioDirectory(cfg *config.Config) *RadioDirectory {
+	configPath := filepath.Join(cfg.App.DataDir, "radio_stations.json")
+	rd := &RadioDirectory{
+		stations:   make([]RadioStation, 0),
+		configPath: configPath,
+	}
+	rd.loadStations()
+	return rd
+}
+
+// loadStations loads stations from configuration file
+func (d *RadioDirectory) loadStations() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	// Try to load from configuration file
+	if data, err := os.ReadFile(d.configPath); err == nil {
+		var stations []RadioStation
+		if err := json.Unmarshal(data, &stations); err == nil {
+			d.stations = stations
+			return nil
+		}
+	}
+
+	// Use example stations if no config exists
+	d.stations = d.getExampleStations()
+	
+	// Save example stations to config
+	return d.saveStations()
+}
+
+// getExampleStations returns example stations for initial setup
+func (d *RadioDirectory) getExampleStations() []RadioStation {
+	return []RadioStation{
+		{
+			Name:        "Example Station 1",
+			URL:         "stream://configure-your-stations.example",
+			Genre:       "Various",
+			Country:     "US",
+			Format:      "mp3",
+			Bitrate:     128000,
+			Description: "Configure your own stations in radio_stations.json",
+		},
+		{
+			Name:        "Example Station 2",
+			URL:         "stream://add-real-urls.example",
+			Genre:       "Various",
+			Country:     "UK",
+			Format:      "mp3",
+			Bitrate:     192000,
+			Description: "Edit radio_stations.json to add real stations",
+		},
 	}
 }
 
-// LoadDefaultStations loads a default set of radio stations
-func (d *RadioDirectory) LoadDefaultStations() {
-	// Add some default stations
-	defaultStations := []RadioStation{
-		{
-			Name:    "BBC Radio 1",
-			URL:     "http://stream.live.vc.bbcmedia.co.uk/bbc_radio_one",
-			Genre:   "Pop",
-			Country: "UK",
-			Format:  "mp3",
-			Bitrate: 128000,
-		},
-		{
-			Name:    "SomaFM - Groove Salad",
-			URL:     "http://ice1.somafm.com/groovesalad-128-mp3",
-			Genre:   "Ambient",
-			Country: "US",
-			Format:  "mp3",
-			Bitrate: 128000,
-		},
-		// Add more default stations as needed
+// saveStations saves stations to configuration file
+func (d *RadioDirectory) saveStations() error {
+	// Ensure directory exists
+	dir := filepath.Dir(d.configPath)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return fmt.Errorf("failed to create config directory: %w", err)
 	}
-	
-	d.mu.Lock()
-	d.stations = defaultStations
-	d.mu.Unlock()
+
+	data, err := json.MarshalIndent(d.stations, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal stations: %w", err)
+	}
+
+	// Write with secure permissions
+	if err := os.WriteFile(d.configPath, data, 0600); err != nil {
+		return fmt.Errorf("failed to write stations file: %w", err)
+	}
+
+	return nil
 }
 
 // GetStations returns all radio stations
@@ -333,10 +380,49 @@ func (d *RadioDirectory) SearchStations(query string) []RadioStation {
 }
 
 // AddStation adds a custom radio station
-func (d *RadioDirectory) AddStation(station RadioStation) {
+func (d *RadioDirectory) AddStation(station RadioStation) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	
+	// Check for duplicates
+	for _, s := range d.stations {
+		if s.URL == station.URL {
+			return fmt.Errorf("station with URL %s already exists", station.URL)
+		}
+	}
+	
 	d.stations = append(d.stations, station)
+	return d.saveStations()
+}
+
+// RemoveStation removes a station by URL
+func (d *RadioDirectory) RemoveStation(url string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	
+	for i, s := range d.stations {
+		if s.URL == url {
+			d.stations = append(d.stations[:i], d.stations[i+1:]...)
+			return d.saveStations()
+		}
+	}
+	
+	return fmt.Errorf("station not found")
+}
+
+// UpdateStation updates an existing station
+func (d *RadioDirectory) UpdateStation(url string, updated RadioStation) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	
+	for i, s := range d.stations {
+		if s.URL == url {
+			d.stations[i] = updated
+			return d.saveStations()
+		}
+	}
+	
+	return fmt.Errorf("station not found")
 }
 
 // StreamCache caches stream metadata

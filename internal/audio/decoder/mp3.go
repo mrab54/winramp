@@ -73,6 +73,12 @@ func NewMP3Decoder(reader io.ReadSeeker) (*MP3Decoder, error) {
 	duration := time.Duration(sampleCount) * time.Second / time.Duration(format.SampleRate)
 	metadata.Duration = duration
 
+	// Use a reasonable initial buffer size
+	initialBufferSize := 4096
+	if initialBufferSize > 1024*1024 {
+		initialBufferSize = 1024 * 1024
+	}
+	
 	return &MP3Decoder{
 		BaseDecoder: BaseDecoder{
 			format:      format,
@@ -81,7 +87,7 @@ func NewMP3Decoder(reader io.ReadSeeker) (*MP3Decoder, error) {
 		},
 		reader:  reader,
 		decoder: decoder,
-		buffer:  make([]byte, 4096),
+		buffer:  make([]byte, initialBufferSize),
 	}, nil
 }
 
@@ -90,10 +96,25 @@ func (d *MP3Decoder) Decode(buffer []float32) (int, error) {
 	if d.eof {
 		return 0, ErrEndOfStream
 	}
+	
+	// Validate input buffer
+	if len(buffer) == 0 {
+		return 0, nil
+	}
+	
+	// Limit buffer size to prevent excessive memory allocation
+	const maxBufferSize = 1024 * 1024 // 1MB max
+	if len(buffer) > maxBufferSize/2 {
+		return 0, fmt.Errorf("buffer size exceeds maximum allowed: %d > %d", len(buffer), maxBufferSize/2)
+	}
 
 	// Calculate bytes needed
 	bytesNeeded := len(buffer) * 2 // 2 bytes per sample (int16)
 	if bytesNeeded > len(d.buffer) {
+		// Allocate with size limit
+		if bytesNeeded > maxBufferSize {
+			bytesNeeded = maxBufferSize
+		}
 		d.buffer = make([]byte, bytesNeeded)
 	}
 
@@ -110,7 +131,16 @@ func (d *MP3Decoder) Decode(buffer []float32) (int, error) {
 
 	// Convert bytes to int16 then to float32
 	samplesRead := n / 2
+	// Ensure we don't write beyond buffer bounds
+	if samplesRead > len(buffer) {
+		samplesRead = len(buffer)
+	}
+	
 	for i := 0; i < samplesRead; i++ {
+		// Bounds check for safety
+		if i*2+1 >= n {
+			break
+		}
 		sample := int16(d.buffer[i*2]) | int16(d.buffer[i*2+1])<<8
 		buffer[i] = float32(sample) / 32768.0
 	}
@@ -124,10 +154,25 @@ func (d *MP3Decoder) DecodeInt16(buffer []int16) (int, error) {
 	if d.eof {
 		return 0, ErrEndOfStream
 	}
+	
+	// Validate input buffer
+	if len(buffer) == 0 {
+		return 0, nil
+	}
+	
+	// Limit buffer size to prevent excessive memory allocation
+	const maxBufferSize = 1024 * 1024 // 1MB max
+	if len(buffer) > maxBufferSize/2 {
+		return 0, fmt.Errorf("buffer size exceeds maximum allowed: %d > %d", len(buffer), maxBufferSize/2)
+	}
 
 	// Calculate bytes needed
 	bytesNeeded := len(buffer) * 2
 	if bytesNeeded > len(d.buffer) {
+		// Allocate with size limit
+		if bytesNeeded > maxBufferSize {
+			bytesNeeded = maxBufferSize
+		}
 		d.buffer = make([]byte, bytesNeeded)
 	}
 
@@ -144,7 +189,16 @@ func (d *MP3Decoder) DecodeInt16(buffer []int16) (int, error) {
 
 	// Convert bytes to int16
 	samplesRead := n / 2
+	// Ensure we don't write beyond buffer bounds
+	if samplesRead > len(buffer) {
+		samplesRead = len(buffer)
+	}
+	
 	for i := 0; i < samplesRead; i++ {
+		// Bounds check for safety
+		if i*2+1 >= n {
+			break
+		}
 		buffer[i] = int16(d.buffer[i*2]) | int16(d.buffer[i*2+1])<<8
 	}
 
@@ -160,8 +214,11 @@ func (d *MP3Decoder) Seek(position time.Duration) error {
 
 // SeekSample seeks to a specific sample position
 func (d *MP3Decoder) SeekSample(sample int64) error {
-	if sample < 0 || sample > d.sampleCount {
-		return fmt.Errorf("sample position out of range")
+	if sample < 0 {
+		return fmt.Errorf("sample position cannot be negative: %d", sample)
+	}
+	if sample > d.sampleCount {
+		return fmt.Errorf("sample position out of range: %d > %d", sample, d.sampleCount)
 	}
 
 	// Calculate byte position (approximate for MP3)
